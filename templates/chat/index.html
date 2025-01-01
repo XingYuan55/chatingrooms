@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>聊天室</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css"
+      rel="stylesheet"
+    />
+    <link
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
+      rel="stylesheet"
+    />
+    <meta name="csrf-token" content="{{ csrf_token }}" />
+    <style>
+      .unread-badge {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 8px;
+        height: 8px;
+        background-color: #ef4444;
+        border-radius: 50%;
+        display: none;
+      }
+      .chat-button {
+        position: relative;
+      }
+    </style>
+  </head>
+  <body class="bg-gray-100 h-screen flex flex-col">
+    <nav class="bg-white shadow-sm">
+      <div
+        class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center"
+      >
+        <div class="flex items-center">
+          <span class="text-xl font-semibold text-gray-800">聊天室</span>
+          <span class="ml-4 text-sm text-gray-600"
+            >欢迎, {{ user.username }}</span
+          >
+        </div>
+        <form
+          method="post"
+          action="{% url 'logout' %}"
+          class="m-0"
+          id="logout-form"
+        >
+          {% csrf_token %}
+          <button type="submit" class="text-gray-600 hover:text-gray-800">
+            <i class="fas fa-sign-out-alt"></i> 退出
+          </button>
+        </form>
+      </div>
+    </nav>
+
+    <div class="flex-1 flex overflow-hidden">
+      <!-- 用户列表 -->
+      <div class="w-64 bg-white border-r border-gray-200 flex flex-col">
+        <div class="p-4 border-b border-gray-200">
+          <h2 class="text-lg font-semibold text-gray-700">在线用户</h2>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4">
+          <ul class="space-y-2">
+            <li>
+              <button
+                onclick="selectReceiver(null, event)"
+                class="chat-button w-full text-left px-3 py-2 rounded-lg hover:bg-gray-100 active"
+                data-username="public"
+              >
+                公共聊天室
+                <span class="unread-badge"></span>
+              </button>
+            </li>
+            {% for other_user in users %}
+            <li>
+              <button
+                onclick="selectReceiver('{{ other_user.username }}', event)"
+                class="chat-button w-full text-left px-3 py-2 rounded-lg hover:bg-gray-100"
+                data-username="{{ other_user.username }}"
+              >
+                {{ other_user.username }}
+                <span class="unread-badge"></span>
+              </button>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+
+      <!-- 聊天区域 -->
+      <div class="flex-1 flex flex-col bg-white">
+        <div class="flex-1 overflow-y-auto p-4" id="chat-box">
+          {% for message in messages %}
+          <div
+            class="message mb-4 {% if message.sender == user %}text-right{% endif %}"
+            data-sender="{{ message.sender.username }}"
+            data-receiver="{{ message.receiver.username|default:'' }}"
+          >
+            <div class="inline-block max-w-lg">
+              <div class="text-sm text-gray-600 mb-1">
+                {{ message.sender.username }} {% if message.receiver %}
+                <span class="text-gray-400">对</span>
+                {{ message.receiver.username }}
+                <span class="text-gray-400">说</span>
+                {% endif %}
+              </div>
+              <div class="bg-gray-100 rounded-lg p-3 inline-block">
+                {% if message.image %}
+                <img
+                  src="{{ message.image.url }}"
+                  class="max-w-sm rounded-lg"
+                />
+                {% endif %} {% if message.content %}
+                <p>{{ message.content }}</p>
+                {% endif %}
+              </div>
+              <div class="text-xs text-gray-500 mt-1">
+                {{ message.timestamp|date:"Y-m-d H:i:s" }}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+
+        <!-- 输入区域 -->
+        <div class="border-t border-gray-200 p-4">
+          <div class="flex items-center space-x-4">
+            <button
+              onclick="document.getElementById('image-upload').click()"
+              class="text-gray-500 hover:text-gray-700"
+            >
+              <i class="fas fa-image"></i>
+            </button>
+            <input
+              type="file"
+              id="image-upload"
+              accept="image/*"
+              style="display: none"
+              onchange="uploadImage(this.files[0])"
+            />
+            <input
+              type="text"
+              id="message"
+              placeholder="输入消息..."
+              class="flex-1 rounded-full border border-gray-300 px-4 py-2 focus:outline-none focus:border-indigo-500"
+            />
+            <button
+              onclick="sendMessage()"
+              class="bg-indigo-600 text-white rounded-full px-6 py-2 hover:bg-indigo-700 focus:outline-none"
+            >
+              发送
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let currentReceiver = null;
+      let chatSocket = null;
+      let isConnected = false;
+
+      function connectWebSocket() {
+        chatSocket = new WebSocket(
+          "ws://" + window.location.host + "/ws/chat/"
+        );
+
+        chatSocket.onopen = function (e) {
+          console.log("WebSocket 连接已建立");
+          isConnected = true;
+        };
+
+        chatSocket.onclose = function (e) {
+          console.log("WebSocket 连接已关闭，正在重新连接...");
+          isConnected = false;
+          setTimeout(connectWebSocket, 2000); // 2秒后重试
+        };
+
+        chatSocket.onerror = function (e) {
+          console.error("WebSocket 错误:", e);
+        };
+
+        chatSocket.onmessage = function (e) {
+          console.log("收到消息:", e.data);
+          const data = JSON.parse(e.data);
+          const chatBox = document.getElementById("chat-box");
+
+          // 检查消息是否应该显示
+          const shouldShow = !currentReceiver
+            ? !data.receiver // 在公共聊天室
+            : (data.username === currentReceiver &&
+                data.receiver === "{{ user.username }}") || // 接收到私聊
+              (data.username === "{{ user.username }}" &&
+                data.receiver === currentReceiver); // 发送的私聊
+
+          // 处理未读消息提示
+          if (!shouldShow && data.username !== "{{ user.username }}") {
+            const targetUsername = data.receiver ? data.username : "public";
+            const button = document.querySelector(
+              `button[data-username="${targetUsername}"]`
+            );
+            if (button) {
+              const badge = button.querySelector(".unread-badge");
+              if (badge) {
+                badge.style.display = "block";
+              }
+            }
+          }
+
+          // 创建新消息元素
+          const messageDiv = document.createElement("div");
+          messageDiv.className = `message mb-4 ${
+            data.username === "{{ user.username }}" ? "text-right" : ""
+          }`;
+          messageDiv.dataset.sender = data.username;
+          messageDiv.dataset.receiver = data.receiver || "";
+
+          const innerDiv = document.createElement("div");
+          innerDiv.className = "inline-block max-w-lg";
+
+          const headerDiv = document.createElement("div");
+          headerDiv.className = "text-sm text-gray-600 mb-1";
+          headerDiv.textContent = data.username;
+
+          if (data.receiver) {
+            headerDiv.innerHTML += ` <span class="text-gray-400">对</span> ${data.receiver} <span class="text-gray-400">说</span>`;
+          }
+
+          const contentDiv = document.createElement("div");
+          contentDiv.className = "bg-gray-100 rounded-lg p-3 inline-block";
+
+          if (data.message.startsWith("[图片]")) {
+            const img = document.createElement("img");
+            img.src = data.message.split(" ")[1];
+            img.className = "max-w-sm rounded-lg";
+            contentDiv.appendChild(img);
+          } else {
+            contentDiv.textContent = data.message;
+          }
+
+          const timeDiv = document.createElement("div");
+          timeDiv.className = "text-xs text-gray-500 mt-1";
+          timeDiv.textContent = new Date().toLocaleString();
+
+          innerDiv.appendChild(headerDiv);
+          innerDiv.appendChild(contentDiv);
+          innerDiv.appendChild(timeDiv);
+          messageDiv.appendChild(innerDiv);
+          chatBox.appendChild(messageDiv);
+
+          // 根据当前选择的聊天室更新消息显示
+          messageDiv.style.display = shouldShow ? "block" : "none";
+
+          // 滚动到底部
+          if (shouldShow) {
+            chatBox.scrollTop = chatBox.scrollHeight;
+          }
+        };
+      }
+
+      // 初始化 WebSocket 连接
+      connectWebSocket();
+
+      function sendMessage() {
+        const messageInput = document.getElementById("message");
+        const message = messageInput.value.trim();
+
+        if (message && isConnected) {
+          console.log("发送消息:", {
+            type: "message",
+            message: message,
+            username: "{{ user.username }}",
+            receiver: currentReceiver,
+          });
+
+          chatSocket.send(
+            JSON.stringify({
+              type: "message",
+              message: message,
+              username: "{{ user.username }}",
+              receiver: currentReceiver,
+            })
+          );
+          messageInput.value = "";
+        } else if (!isConnected) {
+          alert("正在连接服务器，请稍后再试...");
+        }
+      }
+
+      // 处理登出
+      document
+        .getElementById("logout-form")
+        .addEventListener("submit", function (e) {
+          e.preventDefault();
+          fetch(this.action, {
+            method: "POST",
+            headers: {
+              "X-CSRFToken": document.querySelector(
+                "[name=csrfmiddlewaretoken]"
+              ).value,
+            },
+          }).then(() => {
+            window.location.href = "/login/";
+          });
+        });
+
+      function selectReceiver(username, event) {
+        currentReceiver = username;
+        // 移除所有按钮的 active 类
+        document.querySelectorAll(".space-y-2 button").forEach((btn) => {
+          btn.classList.remove("bg-gray-100");
+        });
+        // 给当前选中的按钮添加 active 类并清除未读标记
+        if (event && event.target) {
+          const button = event.target.closest(".chat-button");
+          if (button) {
+            button.classList.add("bg-gray-100");
+            const badge = button.querySelector(".unread-badge");
+            if (badge) {
+              badge.style.display = "none";
+            }
+          }
+        }
+
+        // 更新消息显示
+        updateMessageVisibility();
+
+        // 滚动到底部
+        const chatBox = document.getElementById("chat-box");
+        chatBox.scrollTop = chatBox.scrollHeight;
+      }
+
+      // 新增函数：更新消息显示
+      function updateMessageVisibility() {
+        document.querySelectorAll(".message").forEach((msg) => {
+          const sender = msg.dataset.sender;
+          const receiver = msg.dataset.receiver;
+
+          if (!currentReceiver) {
+            // 公共聊天室：显示所有公共消息
+            msg.style.display = !receiver ? "block" : "none";
+          } else {
+            // 私聊：显示与当前用户相关的消息
+            msg.style.display =
+              (sender === currentReceiver &&
+                receiver === "{{ user.username }}") ||
+              (sender === "{{ user.username }}" && receiver === currentReceiver)
+                ? "block"
+                : "none";
+          }
+        });
+      }
+
+      async function uploadImage(file) {
+        const formData = new FormData();
+        formData.append("image", file);
+        if (currentReceiver) {
+          formData.append("receiver", currentReceiver);
+        }
+
+        try {
+          const response = await fetch("/upload/", {
+            method: "POST",
+            body: formData,
+            headers: {
+              "X-CSRFToken": document.querySelector(
+                "[name=csrfmiddlewaretoken]"
+              ).value,
+            },
+          });
+
+          const data = await response.json();
+          if (data.status === "success") {
+            chatSocket.send(
+              JSON.stringify({
+                type: "message",
+                message: `[图片] ${data.image_url}`,
+                username: "{{ user.username }}",
+                receiver: currentReceiver,
+              })
+            );
+          }
+        } catch (error) {
+          console.error("上传图片失败:", error);
+        }
+      }
+
+      // 处理回车发送消息
+      document
+        .getElementById("message")
+        .addEventListener("keypress", function (e) {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+          }
+        });
+
+      // 初始化时选择公共聊天室
+      selectReceiver(null, null);
+    </script>
+  </body>
+</html>
